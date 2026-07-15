@@ -1,0 +1,75 @@
+# Local tooling for camoufox-server.
+#   mise install        install every tool below
+#   mise run check      run the full lint/format suite (what CI runs)
+#
+# Tools are pinned exact and use the aqua backend (GitHub-release binaries) so
+# a bump is an explicit, reviewable change. yamllint is Python-only, so it goes
+# through pipx.
+
+[settings]
+experimental = true
+
+[tools]
+"aqua:evilmartians/lefthook" = "2.1.10"      # git hooks
+"aqua:hadolint/hadolint" = "2.14.0"          # Dockerfile linter
+"aqua:rhysd/actionlint" = "1.7.12"           # GitHub Actions linter
+"aqua:zizmorcore/zizmor" = "1.27.0"          # GitHub Actions security auditor
+"aqua:astral-sh/ruff" = "0.15.21"            # Python lint + format
+"aqua:koalaman/shellcheck" = "0.11.0"        # shell linter
+"pipx:yamllint" = "1.38.0"                   # YAML linter
+
+[tasks.fmt]
+description = "Format Python in place"
+run = "ruff format ."
+
+[tasks.fmt-check]
+description = "Fail if Python is not formatted"
+run = "ruff format --check ."
+
+[tasks.lint-py]
+description = "Lint Python"
+run = "ruff check ."
+
+[tasks.lint-yaml]
+description = "Lint YAML"
+run = "yamllint ."
+
+[tasks.lint-docker]
+description = "Lint the Dockerfile"
+run = "hadolint Dockerfile"
+
+[tasks.lint-actions]
+description = "Lint GitHub Actions workflows"
+run = "actionlint"
+
+[tasks.audit-actions]
+description = "Security-audit GitHub Actions workflows"
+run = "zizmor .github/workflows"
+
+[tasks.lint-shell]
+description = "Lint shell scripts (no-op when there are none)"
+run = '''
+files="$(git ls-files '*.sh' '*.bash')"
+if [ -n "$files" ]; then
+  # shellcheck disable=SC2086 - word splitting is what we want here
+  shellcheck $files
+else
+  echo "no shell scripts"
+fi
+'''
+
+[tasks.check]
+description = "Full lint/format suite (what CI runs)"
+depends = [
+  "fmt-check",
+  "lint-py",
+  "lint-yaml",
+  "lint-docker",
+  "lint-actions",
+  "audit-actions",
+  "lint-shell",
+]
+
+[tasks.install-hooks]
+description = "Install lefthook git hooks"
+run = "lefthook install"

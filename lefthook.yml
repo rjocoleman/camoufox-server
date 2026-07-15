@@ -1,0 +1,31 @@
+---
+# Git hooks via lefthook.
+#   mise run install-hooks   (or: lefthook install)
+#
+# Tools are resolved through mise so hooks use the pinned versions regardless of
+# what is on PATH.
+
+pre-commit:
+  parallel: true
+  commands:
+    ruff-format:
+      glob: "*.py"
+      run: mise run fmt-check
+    ruff-lint:
+      glob: "*.py"
+      run: mise run lint-py
+    yamllint:
+      glob: "*.{yml,yaml}"
+      run: mise run lint-yaml
+    hadolint:
+      glob: "Dockerfile*"
+      run: mise run lint-docker
+    actionlint:
+      glob: ".github/workflows/*.{yml,yaml}"
+      run: mise run lint-actions
+    zizmor:
+      glob: ".github/workflows/*.{yml,yaml}"
+      run: mise run audit-actions
+    shellcheck:
+      glob: "*.{sh,bash}"
+      run: mise run lint-shell

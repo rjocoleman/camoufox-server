@@ -1,0 +1,4 @@
+# DL3008: pinning every apt package to an exact version is brittle across
+# Debian point releases and buys little here; we pin the base image tag instead.
+ignored:
+  - DL3008

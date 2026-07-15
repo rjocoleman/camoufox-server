@@ -1,0 +1,14 @@
+---
+extends: default
+
+rules:
+  # GitHub Actions and most tools are happy without an explicit `---` start, and
+  # `on:` in workflows is a genuine key, not the boolean "on".
+  document-start: disable
+  truthy:
+    check-keys: false
+  line-length:
+    # SHA-pinned `uses:` lines carry a version comment and run long; allow it.
+    max: 120
+  comments:
+    min-spaces-from-content: 1

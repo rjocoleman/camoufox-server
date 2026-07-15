@@ -1,0 +1,141 @@
+name: track-upstream
+
+# Watch for new Camoufox releases and bump the pinned versions automatically.
+#
+# There are two separate pins in the Dockerfile:
+#   - ARG CAMOUFOX_VERSION: the cloverlabs-camoufox pip wrapper, tracked from
+#     PyPI. (The original camoufox package is frozen at 0.4.11; the fork is
+#     the actively published wrapper, endorsed by the upstream README.)
+#   - ARG CAMOUFOX_BROWSER_VERSION + per-arch build labels: the patched
+#     Firefox build, tracked from GitHub releases on daijro/camoufox. Since
+#     wrapper 0.5.x the pip version no longer implies a browser version, so
+#     the browser is pinned and tracked on its own.
+on:
+  workflow_dispatch:
+  schedule:
+    # 05:30 UTC daily, half an hour before the scheduled image build.
+    - cron: "30 5 * * *"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      # persist-credentials stays on: the bump step pushes a branch with this
+      # token. zizmor's artipacked warning is expected and safe here.
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0 # zizmor: ignore[artipacked]
+
+      - name: Compare pinned versions with upstream
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          current_pip="$(grep -E '^ARG CAMOUFOX_VERSION=' Dockerfile | head -n1 | cut -d= -f2)"
+          current_browser="$(grep -E '^ARG CAMOUFOX_BROWSER_VERSION=' Dockerfile | head -n1 | cut -d= -f2)"
+          current_amd64="$(grep -E '^ARG CAMOUFOX_BUILD_AMD64=' Dockerfile | head -n1 | cut -d= -f2)"
+          current_arm64="$(grep -E '^ARG CAMOUFOX_BUILD_ARM64=' Dockerfile | head -n1 | cut -d= -f2)"
+
+          latest_pip="$(curl -fsSL https://pypi.org/pypi/cloverlabs-camoufox/json | jq -r '.info.version')"
+
+          # Latest non-prerelease browser release that ships both linux
+          # architectures. Assets are named
+          # camoufox-{version}-{build}-lin.{arch}.zip, and the build label can
+          # differ per arch for the same Firefox version.
+          release="$(gh api repos/daijro/camoufox/releases --jq '
+            [ .[]
+              | select((.prerelease or .draft) | not)
+              | { amd64: ([.assets[].name | select(endswith("-lin.x86_64.zip"))] | first),
+                  arm64: ([.assets[].name | select(endswith("-lin.arm64.zip"))] | first) }
+              | select(.amd64 and .arm64)
+            ] | first | "\(.amd64) \(.arm64)"')"
+
+          read -r asset_amd64 asset_arm64 <<< "$release"
+
+          strip() { local s="${1#camoufox-}"; echo "${s%-lin.*.zip}"; }
+          full_amd64="$(strip "$asset_amd64")"   # e.g. 150.0.2-alpha.26
+          full_arm64="$(strip "$asset_arm64")"
+
+          latest_browser="${full_amd64%%-*}"
+          latest_amd64="${full_amd64#*-}"
+          latest_arm64="${full_arm64#*-}"
+
+          if [ "${full_arm64%%-*}" != "$latest_browser" ]; then
+            echo "Firefox version differs between arches ($full_amd64 vs $full_arm64); needs a human." >&2
+            exit 1
+          fi
+
+          {
+            echo "pip=$latest_pip"
+            echo "browser=$latest_browser"
+            echo "amd64=$latest_amd64"
+            echo "arm64=$latest_arm64"
+          } >> "$GITHUB_OUTPUT"
+
+          if [ "$current_pip" = "$latest_pip" ] \
+            && [ "$current_browser" = "$latest_browser" ] \
+            && [ "$current_amd64" = "$latest_amd64" ] \
+            && [ "$current_arm64" = "$latest_arm64" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Already up to date (pip $current_pip, browser $current_browser)."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Bump available: pip $current_pip -> $latest_pip"
+            echo "  browser $current_browser -> $latest_browser ($latest_amd64/$latest_arm64)"
+          fi
+
+      # Open (or update) a PR bumping the ARGs. A PR rather than a direct
+      # commit keeps a human in the loop, since a new Firefox build can shift
+      # fingerprints and is worth a quick sanity check before it ships. The
+      # playwright pin in the Dockerfile also needs a manual once-over on
+      # wrapper bumps (see the comment there).
+      - name: Open bump PR
+        if: steps.check.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PIP: ${{ steps.check.outputs.pip }}
+          BROWSER: ${{ steps.check.outputs.browser }}
+          AMD64: ${{ steps.check.outputs.amd64 }}
+          ARM64: ${{ steps.check.outputs.arm64 }}
+        run: |
+          set -euo pipefail
+
+          branch="bump-camoufox-${PIP}-${BROWSER}-${AMD64}-${ARM64}"
+
+          # Nothing to do if the bump PR already exists.
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+            echo "Branch $branch already exists, skipping."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+
+          # sed with a literal match on the pinned lines; the version strings
+          # are simple (digits, dots, "alpha."/"beta." labels) so no escaping
+          # games are needed.
+          sed -i "s/^ARG CAMOUFOX_VERSION=.*/ARG CAMOUFOX_VERSION=${PIP}/" Dockerfile
+          sed -i "s/^ARG CAMOUFOX_BROWSER_VERSION=.*/ARG CAMOUFOX_BROWSER_VERSION=${BROWSER}/" Dockerfile
+          sed -i "s/^ARG CAMOUFOX_BUILD_AMD64=.*/ARG CAMOUFOX_BUILD_AMD64=${AMD64}/" Dockerfile
+          sed -i "s/^ARG CAMOUFOX_BUILD_ARM64=.*/ARG CAMOUFOX_BUILD_ARM64=${ARM64}/" Dockerfile
+
+          git add Dockerfile
+          git commit -m "chore: bump camoufox to browser ${BROWSER} / pip ${PIP}"
+          git push origin "$branch"
+
+          body="Automated bump of the pinned versions: cloverlabs-camoufox pip"
+          body="${body} to ${PIP}, browser to ${BROWSER} (amd64 ${AMD64},"
+          body="${body} arm64 ${ARM64}). Check the playwright pin comment in"
+          body="${body} the Dockerfile before merging; merging rebuilds and"
+          body="${body} publishes the image."
+
+          gh pr create \
+            --title "chore: bump camoufox to ${BROWSER}" \
+            --body "$body" \
+            --base main \
+            --head "$branch"
