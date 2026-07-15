@@ -27,7 +27,7 @@ ARG CAMOUFOX_BUILD_ARM64=alpha.25
 # Pin to bookworm on purpose: several runtime libraries below (notably
 # libasound2) were renamed with a t64 suffix in Debian trixie, so a floating
 # slim tag would break the apt install with no warning.
-FROM python:3.12-slim-bookworm
+FROM python:3.14-slim-bookworm
 
 ARG CAMOUFOX_VERSION
 ARG CAMOUFOX_BROWSER_VERSION
