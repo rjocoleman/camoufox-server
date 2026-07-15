@@ -1,6 +1,6 @@
 name: build
 
-# Build the Camoufox server image and push it to GHCR.
+# Build the Camoufox server image, smoke-test it, and push it to GHCR.
 #
 # Triggers:
 #   - push to main so code changes ship straight away
@@ -33,13 +33,22 @@ jobs:
 
       # The image tag follows the pinned browser version (the Firefox build is
       # what consumers care about), read from the Dockerfile ARG so the tag
-      # always matches what actually got installed. Both pins are baked in via
-      # their Dockerfile ARG defaults, so no build-args are passed.
-      - name: Resolve browser version
+      # always matches what actually got installed. We also read the pinned
+      # playwright version so the smoke-test client speaks the same protocol
+      # version as the server. Both pins are baked in via their Dockerfile ARG
+      # defaults, so no build-args are passed.
+      - name: Resolve versions
         id: version
         run: |
-          version="$(grep -E '^ARG CAMOUFOX_BROWSER_VERSION=' Dockerfile | head -n1 | cut -d= -f2)"
-          echo "browser_version=$version" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          browser="$(grep -E '^ARG CAMOUFOX_BROWSER_VERSION=' Dockerfile | head -n1 | cut -d= -f2)"
+          playwright="$(grep -E '^ARG PLAYWRIGHT_VERSION=' Dockerfile | head -n1 | cut -d= -f2)"
+          if [ -z "$browser" ] || [ -z "$playwright" ]; then
+            echo "could not read version ARGs from Dockerfile (browser='$browser' playwright='$playwright')" >&2
+            exit 1
+          fi
+          echo "browser_version=$browser" >> "$GITHUB_OUTPUT"
+          echo "playwright_version=$playwright" >> "$GITHUB_OUTPUT"
 
       # QEMU lets us build linux/arm64 on the amd64 runner. Upstream ships a
       # lin.arm64 Camoufox build, so arm64 is feasible; it is emulated here and
@@ -54,6 +63,79 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Build the native amd64 image and load it into the local docker so we can
+      # exercise it before publishing anything. buildx caches these layers, so
+      # the multi-arch push below reuses the amd64 work and only pays for arm64.
+      - name: Build amd64 for smoke test
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: camoufox-server:smoke
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Start the server and drive it with a real Playwright client. This is the
+      # only check that proves the image actually launches and serves a browser
+      # over the websocket; the build alone only proves the browser downloaded.
+      # A failure here blocks the publish step below.
+      - name: Smoke test
+        env:
+          PLAYWRIGHT_VERSION: ${{ steps.version.outputs.playwright_version }}
+          BROWSER_VERSION: ${{ steps.version.outputs.browser_version }}
+        run: |
+          set -euo pipefail
+          # Dump the server logs on failure and always clean up the container,
+          # whichever step (readiness, connect, assert) we bail out on.
+          cleanup() {
+            rc=$?
+            if [ "$rc" -ne 0 ]; then
+              echo "=== server logs ==="
+              docker logs smoke 2>&1 || true
+            fi
+            docker rm -f smoke >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          # Bind to loopback so the browser is not exposed on the runner network.
+          docker run -d --name smoke -p 127.0.0.1:3000:3000 camoufox-server:smoke
+
+          # Wait for launch_server() to print its endpoint (usually a few
+          # seconds); the trap dumps the logs if it never does.
+          for i in $(seq 1 30); do
+            if docker logs smoke 2>&1 | grep -qi "websocket endpoint"; then
+              break
+            fi
+            if [ "$i" = "30" ]; then
+              echo "server did not start in time" >&2
+              exit 1
+            fi
+            sleep 2
+          done
+
+          # connect() only needs the bundled driver, no browser download.
+          python3 -m pip install --quiet "playwright==${PLAYWRIGHT_VERSION}"
+          python3 - <<'PY'
+          import os
+          from playwright.sync_api import sync_playwright
+
+          major = os.environ["BROWSER_VERSION"].split(".", 1)[0]
+          with sync_playwright() as p:
+              browser = p.firefox.connect("ws://localhost:3000/camoufox")
+              page = browser.new_page()
+              page.goto("https://example.com")
+              title = page.title()
+              ua = page.evaluate("navigator.userAgent")
+              browser.close()
+
+          assert "Example Domain" in title, f"unexpected title: {title!r}"
+          assert f"Firefox/{major}" in ua, f"unexpected user agent: {ua!r}"
+          print(f"smoke ok: {title!r} | {ua!r}")
+          PY
+
+      # Only reached if the smoke test passed. Reuses the cached amd64 layers
+      # and builds arm64 on top, then pushes the multi-arch manifest.
       - name: Build and push
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
