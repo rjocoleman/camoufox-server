@@ -40,8 +40,13 @@ jobs:
       - name: Resolve versions
         id: version
         run: |
+          set -euo pipefail
           browser="$(grep -E '^ARG CAMOUFOX_BROWSER_VERSION=' Dockerfile | head -n1 | cut -d= -f2)"
           playwright="$(grep -E '^ARG PLAYWRIGHT_VERSION=' Dockerfile | head -n1 | cut -d= -f2)"
+          if [ -z "$browser" ] || [ -z "$playwright" ]; then
+            echo "could not read version ARGs from Dockerfile (browser='$browser' playwright='$playwright')" >&2
+            exit 1
+          fi
           echo "browser_version=$browser" >> "$GITHUB_OUTPUT"
           echo "playwright_version=$playwright" >> "$GITHUB_OUTPUT"
 
@@ -81,17 +86,29 @@ jobs:
           BROWSER_VERSION: ${{ steps.version.outputs.browser_version }}
         run: |
           set -euo pipefail
-          docker run -d --name smoke -p 3000:3000 camoufox-server:smoke
+          # Dump the server logs on failure and always clean up the container,
+          # whichever step (readiness, connect, assert) we bail out on.
+          cleanup() {
+            rc=$?
+            if [ "$rc" -ne 0 ]; then
+              echo "=== server logs ==="
+              docker logs smoke 2>&1 || true
+            fi
+            docker rm -f smoke >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          # Bind to loopback so the browser is not exposed on the runner network.
+          docker run -d --name smoke -p 127.0.0.1:3000:3000 camoufox-server:smoke
 
           # Wait for launch_server() to print its endpoint (usually a few
-          # seconds); fail loudly with the logs if it never does.
+          # seconds); the trap dumps the logs if it never does.
           for i in $(seq 1 30); do
-            if docker logs smoke 2>&1 | grep -q "Websocket endpoint"; then
+            if docker logs smoke 2>&1 | grep -qi "websocket endpoint"; then
               break
             fi
             if [ "$i" = "30" ]; then
               echo "server did not start in time" >&2
-              docker logs smoke
               exit 1
             fi
             sleep 2
@@ -116,8 +133,6 @@ jobs:
           assert f"Firefox/{major}" in ua, f"unexpected user agent: {ua!r}"
           print(f"smoke ok: {title!r} | {ua!r}")
           PY
-
-          docker rm -f smoke
 
       # Only reached if the smoke test passed. Reuses the cached amd64 layers
       # and builds arm64 on top, then pushes the multi-arch manifest.
