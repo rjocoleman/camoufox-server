@@ -20,9 +20,9 @@ ARG CAMOUFOX_VERSION=0.6.0
 #
 # Upstream ships different build labels per architecture for the same Firefox
 # version (the lin.x86_64 asset was rebuilt as alpha.26), hence two ARGs.
-ARG CAMOUFOX_BROWSER_VERSION=150.0.2
-ARG CAMOUFOX_BUILD_AMD64=alpha.26
-ARG CAMOUFOX_BUILD_ARM64=alpha.25
+ARG CAMOUFOX_BROWSER_VERSION=152.0.4
+ARG CAMOUFOX_BUILD_AMD64=beta.28
+ARG CAMOUFOX_BUILD_ARM64=beta.28
 
 # Pin to bookworm on purpose: several runtime libraries below (notably
 # libasound2) were renamed with a t64 suffix in Debian trixie, so a floating
